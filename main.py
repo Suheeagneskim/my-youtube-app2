@@ -1,63 +1,71 @@
+import re
 import streamlit as st
-import pandas as pd
 import requests
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 # 기본 설정
-st.set_page_config(page_title="KOBIS 일별 박스오피스", layout="wide")
-st.title("🎬 어제의 박스오피스 대시보드")
+st.set_page_config(page_title="유튜브 댓글 분석", page_icon="💬")
+st.title("💬 유튜브 댓글 분석")
 
-# 한국 시간 기준 어제 날짜 자동 계산 (KOBIS는 YYYYMMDD 형식)
-yesterday = datetime.now(ZoneInfo("Asia/Seoul")) - timedelta(days=1)
-target_dt = yesterday.strftime("%Y%m%d")
-st.caption(f"조회 기준일(어제): {yesterday.strftime('%Y-%m-%d')}")
+YOUTUBE_KEY = st.secrets["YOUTUBE_API_KEY"]
 
-# 비밀 금고에서 인증키 불러오기
-KOBIS_KEY = st.secrets["KOBIS_KEY"]
+# 예시 영상 두 개 (버튼으로 골라 넣기)
+DEFAULT_URL = "https://youtu.be/d95J8yzvjbQ?si=LfL5DLwCL8Pk077r"   # 딥마인드 다큐 (영어)
+KOREAN_URL = "https://youtu.be/I9vK5EVTt0U?si=NEZ8L7MRuNvrzINa"    # 2002 월드컵 추억 (한국어)
 
-# API 호출
-url = "http://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
-res = requests.get(url, params={"key": KOBIS_KEY, "targetDt": target_dt})
+if "video_url" not in st.session_state:
+    st.session_state.video_url = DEFAULT_URL
 
-if res.status_code != 200:
-    st.error(f"요청이 실패했어요 (상태코드: {res.status_code})")
-    st.stop()
+col1, col2 = st.columns(2)
+if col1.button("🎬 예시 1 · 딥마인드 다큐 (영어 댓글)"):
+    st.session_state.video_url = DEFAULT_URL
+if col2.button("⚽ 예시 2 · 2002 월드컵 추억"):
+    st.session_state.video_url = KOREAN_URL
 
-data = res.json()
+# 영상 링크 입력창 (예시 버튼을 누르면 자동으로 채워져요)
+video_url = st.text_input("유튜브 영상 링크를 붙여넣으세요", key="video_url")
 
-# 키가 틀리면 faultInfo 상자가 온다
-if "faultInfo" in data:
-    st.error("인증키가 올바르지 않아요. Secrets의 KOBIS_KEY를 확인해 주세요.")
-    st.stop()
 
-box_list = data.get("boxOfficeResult", {}).get("dailyBoxOfficeList", [])
-if not box_list:
-    st.error("데이터가 없어요. 날짜 형식(YYYYMMDD)을 확인해 주세요.")
-    st.stop()
+def extract_video_id(url):
+    """youtu.be 짧은 주소, watch 주소에서 영상 ID(11글자)를 뽑는다."""
+    match = re.search(r"(?:youtu\.be/|v=|shorts/)([A-Za-z0-9_-]{11})", url)
+    return match.group(1) if match else None
 
-df = pd.DataFrame(box_list)
 
-# 문자열로 오는 숫자들을 진짜 숫자로 변환
-for col in ["rank", "audiCnt", "audiAcc", "scrnCnt", "showCnt"]:
-    df[col] = pd.to_numeric(df[col])
+if st.button("댓글 가져오기 💬"):
+    video_id = extract_video_id(video_url.strip())
+    if not video_id:
+        st.error("링크에서 영상 ID를 찾지 못했어요. 유튜브 영상 링크가 맞는지 확인해 주세요.")
+    else:
+        api_url = "https://www.googleapis.com/youtube/v3/commentThreads"
+        params = {
+            "part": "snippet",
+            "videoId": video_id,
+            "maxResults": 100,
+            "order": "relevance",   # 최신순이 아니라 인기(좋아요 많은) 댓글 위주로
+            "key": YOUTUBE_KEY,
+        }
+        res = requests.get(api_url, params=params)
 
-# 1위 영화 지표 카드
-top = df.sort_values("rank").iloc[0]
-c1, c2, c3 = st.columns(3)
-c1.metric("어제 1위", top["movieNm"])
-c2.metric("어제 관객수", f"{top['audiCnt']:,}명")
-c3.metric("누적 관객", f"{top['audiAcc']:,}명")
+        if res.status_code != 200:
+            st.error(
+                "댓글을 가져오지 못했어요 😢 댓글이 막힌 영상은 아닌지 확인해 주세요. "
+                f"(상태코드: {res.status_code})"
+            )
+        else:
+            items = res.json().get("items", [])
+            rows = []
+            for it in items:
+                snip = it["snippet"]["topLevelComment"]["snippet"]
+                rows.append((snip["textOriginal"], snip.get("likeCount", 0)))
+            rows.sort(key=lambda r: r[1], reverse=True)   # 좋아요 많은 순 정렬
+            st.session_state.comments = [text for text, _ in rows]  # 단어 분석·워드클라우드에서 재사용
+            st.session_state.likes = [n for _, n in rows]
 
-# 보기 좋게 한국어 열 이름으로 정리
-표 = df[["rank", "movieNm", "openDt", "audiCnt", "audiAcc", "scrnCnt"]].copy()
-표.columns = ["순위", "영화명", "개봉일", "관객수", "누적관객", "스크린수"]
-표 = 표.sort_values("순위").reset_index(drop=True)
-
-st.subheader("📋 박스오피스 TOP 10")
-st.dataframe(표, use_container_width=True)
-
-# 관객수 상위 5편 막대그래프
-st.subheader("📈 관객수 상위 5편")
-top5 = 표.sort_values("관객수", ascending=False).head(5)
-st.bar_chart(top5.set_index("영화명")["관객수"])
+# 댓글이 준비되면 개수와 목록 표시 (좋아요 많은 순)
+if "comments" in st.session_state:
+    comments = st.session_state.comments
+    st.metric("가져온 댓글 수", f"{len(comments)}개")
+    st.dataframe(
+        {"좋아요": st.session_state.likes, "댓글": comments},
+        use_container_width=True,
+    )
